@@ -2,14 +2,18 @@
 百度指数爬虫 2024年3月
 """
 import json
+import logging
+import os
 import time
+import traceback
 
 import requests
 from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 import random
-from requests.exceptions import RequestException
+
+logging.basicConfig(level=logging.DEBUG)
 
 
 def generate_http_headers(credential):
@@ -49,12 +53,44 @@ def calculate_yearly_averages(start_date, end_date, data_series):
     df.set_index('Date', inplace=True)
 
     # Calculate the yearly average
-    yearly_averages = df.resample('Y').mean().reset_index()
+    yearly_averages = df.resample('YE').mean().reset_index()
     yearly_averages['Year'] = yearly_averages['Date'].dt.year
     yearly_averages.drop('Date', axis=1, inplace=True)
     yearly_averages.rename(columns={'Data': 'Average'}, inplace=True)
 
     return yearly_averages
+
+
+def str2df(start_date, end_date, data_series, column_name) -> pd.DataFrame:
+    '''
+    将日期与字符串数字对应，并转成df
+    :param start_date: ”2024-8-31“
+    :param end_date: "2024-8-31"
+    :param data_series: “1, 2, 3,...”
+    :param column_name: 关键字显示列名
+    :return:
+    '''
+    # Convert the start and end dates to datetime objects
+    start = datetime.strptime(start_date, '%Y-%m-%d')
+    end = datetime.strptime(end_date, '%Y-%m-%d')
+    days_span = (end - start).days + 1
+
+    # Split the data series into a list and replace empty strings with '0'
+    data_points = data_series.split(',')
+    data_points = ['0' if point == '' else point for point in data_points]
+    data_points = np.array(data_points, dtype=float)
+
+    if days_span <= 366:
+        dates = pd.date_range(start, periods=len(data_points))
+    else:
+        weeks_span = len(data_points)
+        dates = pd.date_range(start, periods=weeks_span, freq='W')
+
+    # Create a DataFrame with the dates and data points
+    df = pd.DataFrame({'Date': dates, column_name: data_points})
+    # df.set_index('Date', inplace=True)
+
+    return df
 
 
 # 解密
@@ -80,19 +116,21 @@ def namely(keywords):
     return '+'.join(keywords)
 
 
-def crawl_request(keywords, startDate, endDate, regionCode, credential, expectedInterval, autoSave):
+def crawl_request(keywords, startDate, endDate, regionCode, credential, expectedInterval, autoSave, max_retries=1) -> dict:
     print('正在查询：', keywords, startDate, endDate, regionCode)
     words = keywords2json(keywords)
 
     # 第一级以逗号分隔，第二级以加号分隔
     testwordset = ','.join([namely(keyword) for keyword in keywords])
-    max_retries = 3  # 最大重试次数
     retries = 0  # 当前重试次数
 
     while retries < max_retries:
         try:
             url = f'https://index.baidu.com/api/AddWordApi/checkWordsExists?word={testwordset}'
-            rsp = requests.get(url, headers=generate_http_headers(credential), timeout=10).json()
+            headers = generate_http_headers(credential)
+            logging.info("url = %s" % url)
+            logging.info(f"headers = {headers}")
+            rsp = requests.get(url, headers=headers, timeout=10).json()
             # 若data的result不为空，则说明关键词不存在，报错并退出
             if rsp['data']['result']:
                 print(f'{testwordset}关键词不存在或组合里有不存在的关键词，请检查')
@@ -108,22 +146,32 @@ def crawl_request(keywords, startDate, endDate, regionCode, credential, expected
             ptbk = requests.get(url, headers=generate_http_headers(credential), timeout=10).json()['data']
 
             # 数据解密
-            res = [0 for _ in range(len(data))]
-            for i in range(len(data)):
-                index_data = decrypt(ptbk, data[i]['all']['data'])
-                # save
-                yearly_averages = calculate_yearly_averages(startDate, endDate, index_data)
-                print(yearly_averages)
+            pds = []
+            res = {}
+            for keyword, data_ in zip(keywords, data):
+                index_data = decrypt(ptbk, data_['all']['data'])
 
-                if autoSave:
-                    file_path = f'output/{namely(keywords[i])} {startDate[:4]}-{endDate[:4]} {regions[regionCode]}.csv'
-                    yearly_averages.to_csv(file_path, index=False)
-                    print(f'已保存文件到 {file_path}')
+                df = str2df(startDate, endDate, index_data, column_name=keyword[0])
+                pds.append(df)
+                # 记录成字典
+                res[keyword[0]] = df.to_dict(orient='records')
 
-                res[i] = yearly_averages.to_dict(orient='records')
+            if autoSave:
+                names = "_".join((" ".join(k) for k in keywords))
+                file_path = f'output/{names}_{startDate}-{endDate}_{regions[str(regionCode)]}.csv'
+                dir_name = os.path.dirname(file_path)
+                os.makedirs(dir_name, exist_ok=True)
+                temp_pd = pds[0]
+                for p in pds[1:]:
+                    temp_pd = pd.merge(temp_pd, p, on="Date")
+                print(temp_pd.head())
+                temp_pd.to_csv(file_path, index=False)
+                print(f'已保存文件到 {file_path}')
+                temp_pd = None
+
             return res
         except Exception as e:
-            print(f'请求失败，错误信息：{e}')
+            traceback.print_exc()  # 打印异常的栈信息
             retries += 1
             print(f'重试第{retries}次...')
             time.sleep(random.randint(1, 3))  # 在重试前等待一段时间
@@ -138,7 +186,7 @@ regions = {}
 def crawl(keywords, startDate, endDate, regionCode, credential, expectedInterval, autoSave):
     global regions
     if not regions:
-        with open('./webui/public/city.json', encoding='utf-8') as f:
+        with open('./public/city.json', encoding='utf-8') as f:
             regions = json.load(f)
 
     res = {regionCode: []}
@@ -167,3 +215,28 @@ def crawl(keywords, startDate, endDate, regionCode, credential, expectedInterval
                 res[t_regionCode].extend(t)
                 time.sleep(expectedInterval / 1000 + random.randint(1, 3) / 2)
     return res
+
+
+if __name__ == '__main__':
+    print("such as：",
+          "http://index.baidu.com/api/SearchApi/index?area=0&word={words}&startDate={startDate}&endDate={endDate}")
+    print('''https://index.baidu.com/api/SearchApi/index?area=0&word=[
+        [
+            {"name":"wukong","wordType":1}
+        ],
+        [
+            {"name":"悟空","wordType":1}
+        ]
+    ]&days=30''')
+
+    keywords = [["黑神话"], ["悟空"], ("八戒",), ("黄风大圣",), ["黄风怪"]]
+    startDate = "2024-07-01"
+    endDate = "2024-8-31"
+    regionCode = 0
+
+    # Load credentials from a JSON file
+    with open('config/credential.json') as f:
+        credentials = json.load(f)
+    res = crawl(keywords=keywords, startDate=startDate, endDate=endDate, regionCode=regionCode,
+                credential=random.choice(credentials), expectedInterval=5000, autoSave=True)
+    print(res)
