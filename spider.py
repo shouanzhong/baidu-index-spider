@@ -116,7 +116,7 @@ def namely(keywords):
     return '+'.join(keywords)
 
 
-def crawl_request(keywords, startDate, endDate, regionCode, credential, expectedInterval, autoSave, max_retries=1) -> dict:
+def crawl_request(keywords, startDate, endDate, regionCode, credential, expectedInterval, proxies={}, autoSave=True, max_retries=1) -> dict:
     print('正在查询：', keywords, startDate, endDate, regionCode)
     words = keywords2json(keywords)
 
@@ -131,14 +131,19 @@ def crawl_request(keywords, startDate, endDate, regionCode, credential, expected
             logging.info("url = %s" % url)
             logging.info(f"headers = {headers}")
             rsp = requests.get(url, headers=headers, timeout=10).json()
+            logging.debug("关键字存在检查: [%s]" % rsp)
             # 若data的result不为空，则说明关键词不存在，报错并退出
             if rsp['data']['result']:
                 print(f'{testwordset}关键词不存在或组合里有不存在的关键词，请检查')
                 return -1
 
             url = f'http://index.baidu.com/api/SearchApi/index?area=0&word={words}&area={regionCode}&startDate={startDate}&endDate={endDate}'
-            rsp = requests.get(url, headers=generate_http_headers(credential), timeout=10).json()
+            rsp = requests.get(url, headers=generate_http_headers(credential), timeout=10, proxies=proxies).json()
+            logging.debug("秘钥获取：%s" % rsp)
 
+            if not rsp["data"]:
+                logging.error("关键字[testwordset] 未能查询到数据！！！ 可能是账号被限制！")
+                return -1
             # 获取解密秘钥
             data = rsp['data']['userIndexes']
             uniqid = rsp['data']['uniqid']
@@ -157,8 +162,9 @@ def crawl_request(keywords, startDate, endDate, regionCode, credential, expected
                 res[keyword[0]] = df.to_dict(orient='records')
 
             if autoSave:
+                data_time = time.strftime("%Y-%m-%d")
                 names = "_".join((" ".join(k) for k in keywords))
-                file_path = f'output/{names}_{startDate}-{endDate}_{regions[str(regionCode)]}.csv'
+                file_path = f'output/{data_time}/{names}_{startDate}-{endDate}_{regions[str(regionCode)]}.csv'
                 dir_name = os.path.dirname(file_path)
                 os.makedirs(dir_name, exist_ok=True)
                 temp_pd = pds[0]
@@ -183,7 +189,7 @@ def crawl_request(keywords, startDate, endDate, regionCode, credential, expected
 regions = {}
 
 
-def crawl(keywords, startDate, endDate, regionCode, credential, expectedInterval, autoSave):
+def crawl(keywords, startDate, endDate, regionCode, credential, proxies, expectedInterval, autoSave):
     global regions
     if not regions:
         with open('./public/city.json', encoding='utf-8') as f:
@@ -195,7 +201,7 @@ def crawl(keywords, startDate, endDate, regionCode, credential, expectedInterval
         print('已完成：', i, '剩余：', len(keywords) - i)
 
         if regionCode != '999':
-            t = crawl_request(selected_keywords, startDate, endDate, regionCode, credential, expectedInterval, autoSave)
+            t = crawl_request(selected_keywords, startDate, endDate, regionCode, credential, expectedInterval, proxies, autoSave)
             if t == -1:
                 # -1 说明此次查询失败，跳过这个地区，进行下一个地区的查询
                 continue
